@@ -57,6 +57,9 @@ class FSRoboRIO(object):
     def set_adcparam(self, ch, adc_mode):
         return self._io.set_adcparam(ch, adc_mode)
 
+    def close(self):
+        self._io.close()
+
 
 class IO(object):
 
@@ -66,6 +69,9 @@ class IO(object):
       self._lock = threading.Lock()
 
     def __del__(self):
+        self.close()
+
+    def close(self):
         if self._initialized and self._rb is not None:
             self._rb.close()
             self._initialized = False

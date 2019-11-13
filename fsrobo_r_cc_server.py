@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 # FSRobo-R Package BSDL
@@ -60,6 +61,10 @@ class FSRoboRCCServer(object):
     _SOCKET_PORT_NUMBER = 5500
     _SOCKET_BACKLOG = 1
     _CONNECT_DEVICE_MAX = 3
+
+    # Nativeとの通信
+    _RBLIB_HOST = "127.0.0.1"
+    _RBLIB_PORT = 12345
     
     def __init__(self):
         """
@@ -67,6 +72,9 @@ class FSRoboRCCServer(object):
         """
         print "CCServer initalize"
         self._connection_thread = [None, None, None]
+        self._rb = None
+        self._rb_use_count = 0
+        self._lock = threading.Lock()
 
     def start(self):
         """
@@ -76,6 +84,7 @@ class FSRoboRCCServer(object):
 
         os.umask(0)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self._SOCKET_IP_ADDRESS, self._SOCKET_PORT_NUMBER))
         sock.listen(self._SOCKET_BACKLOG)
 
@@ -85,25 +94,26 @@ class FSRoboRCCServer(object):
                 print "accept execution"
                 connection, _ = sock.accept()
                 print "accept success"
-                connect_pernmission = False
+                connect_permission = False
                 index = 0
-                while index < self._CONNECT_DEVICE_MAX and connect_pernmission == False:
+                while index < self._CONNECT_DEVICE_MAX and connect_permission == False:
                     # 空いているソケットが存在するかを確認
                     if self._connection_thread[index] is None:
                         print "can connect, because socket is none"
-                        connect_pernmission = True
+                        connect_permission = True
                     else:
                         if self._connection_thread[index].isAlive() == False:
                             print "can connect, because socket is not alive"
-                            connect_pernmission = True
+                            connect_permission = True
                     
-                    if connect_pernmission == False:
+                    if connect_permission == False:
                         index+=1
 
-                service = ServiceThread(connection, connect_pernmission)
+                rb = self._get_robot()
+                service = ServiceThread(connection, connect_permission, rb, self._thread_terminates)
                 service.daemon = True
                 service.start()
-                if connect_pernmission == True:
+                if connect_permission == True:
                     print "give connect permission"
                     self._connection_thread[index] = service
 
@@ -115,6 +125,32 @@ class FSRoboRCCServer(object):
         print "break while"
         sock.close()
         sys.exit(0)
+
+    def _get_robot(self):
+        with self._lock:
+            if self._rb is None:
+                print('open connection to robot')
+                self._rb = rblib.Robot(self._RBLIB_HOST, self._RBLIB_PORT)
+                self._rb.open()
+                self._rb.acq_permission()
+
+            self._rb_use_count += 1
+
+            return self._rb
+
+    def _release_robot(self):
+        with self._lock:
+            self._rb_use_count -= 1
+
+            if self._rb_use_count == 0:
+                print('close connection to robot')
+                self._rb.close()
+                self._rb = None
+
+
+    def _thread_terminates(self):
+        print('thread terminated')
+        self._release_robot()
 
 class ServiceThread(threading.Thread):
     """
@@ -143,27 +179,27 @@ class ServiceThread(threading.Thread):
     # ファイル削除のフラグ
     _FILE_DELETE_TRUE = 1
 
-    # Neativeとの通信
-    _RBLIB_HOST = "127.0.0.1"
-    _RBLIB_PORT = 12345
 
     # コンストラクタ
-    def __init__(self, connection, connect_pernmission):
+    def __init__(self, connection, connect_permission, robot, terminate_callback):
         """
         初期化
         """
         super(ServiceThread, self).__init__()
         print "ServiceThread initialize"
         self._connection = connection
-        self._connect_permission = connect_pernmission
+        self._connect_permission = connect_permission
         self._operation_permission = False
+        self._terminate_callback = terminate_callback
         # rblibクラスを開く
-        self._rblib = rblib.Robot(self._RBLIB_HOST, self._RBLIB_PORT)
-        if connect_pernmission == True:
-            print "rblib open"
-            self._rblib.open()
+        self._rblib = robot
+
         # コマンド実行クラスを初期化
         self._exec_command = fsrobo_r_cc_exec_command.FSRoboRCCExecCommand(self._rblib)
+
+    def _p(self, s, *args):
+        if False:
+            print(s.format(*args))
 
     # 実行関数
     def run(self):
@@ -176,24 +212,24 @@ class ServiceThread(threading.Thread):
                 rec_msg = self._socket_receive(self._connection)
             except Exception:
                 # エラー出力
-                print "receive error"
-                print traceback.print_exc()
+                self._p("receive error")
+                self._p(traceback.print_exc())
                 break
 
             if len(rec_msg) > 0:
-                print "rec_msg:"
-                print rec_msg
+                self._p("rec_msg:")
+                self._p(rec_msg)
                 send_msg = self._exec_recv_cmd(rec_msg)
                 try:
                     self._connection.send(send_msg)
                 except Exception:
                     # エラー出力
-                    print "send error"
-                    print traceback.print_exc()
+                    self._p("send error")
+                    self._p(traceback.print_exc())
                     break
             else:
-                print "socket close"
-                print "rec_msg:" + str(rec_msg)
+                self._p("socket close")
+                self._p( "rec_msg: {}", rec_msg)
                 break
 
         # ソケット通信終了
@@ -201,8 +237,11 @@ class ServiceThread(threading.Thread):
         self._exec_command.close()
         # ソケットを閉じる
         self._connection.close()
+
         # rblibクラスを閉じる
-        self._rblib.close()
+        #self._rblib.close()
+        
+        self._terminate_callback()
 
     def _socket_receive(self, socket_obj):
         """
@@ -214,20 +253,20 @@ class ServiceThread(threading.Thread):
             rec_msgs: クライアントからの受信データ
         """
         # 受信データを取得
-        print "_socket_receive function"
+        self._p("_socket_receive function")
         rec_msgs = socket_obj.recv(self._SOCKET_RECV_BUFF_SIZE)
         if len(rec_msgs) > 0:
-            print "rec_msgs length:" + str(len(rec_msgs))
+            self._p("rec_msgs length: {}", len(rec_msgs))
             # 受信データを全て受信するまでループ
             while self._check_recv_message(rec_msgs) == False:
-                print "_check_recv_message Result False"
+                self._p("_check_recv_message Result False")
                 # 無限ループ回避の為、タイムアウト時間を指定
                 socket_obj.settimeout(self._SOCKET_RECV_TIMEOUT)
                 try:
                     rec_msg = socket_obj.recv(self._SOCKET_RECV_BUFF_SIZE)
                 except socket.timeout:
                     # クライアントに内部データエラーを返す
-                    print "socket time out"
+                    self._p("socket time out")
                     break
                 # 受信データのサイズが0の場合、エラーが発生したと見なす
                 if len(rec_msg) == 0:
@@ -249,12 +288,12 @@ class ServiceThread(threading.Thread):
             True: 受信完了
             False: 受信途中
         """
-        print "_check_recv_message function"
+        self._p("_check_recv_message function")
         decoder = json.JSONDecoder()
         try:
             decoder.raw_decode(rec_msg)
         except ValueError:
-            print "JSON Decode Error"
+            self._p("JSON Decode Error")
             return False
         return True
 
@@ -267,15 +306,15 @@ class ServiceThread(threading.Thread):
         戻り値:
             res_buf: 実行結果のデータ
         """
-        print "function _exec_recv_cmd execution"
+        self._p("function _exec_recv_cmd execution")
         ret_data = {}
         error_code = ErrorCode.SUCCESS
 
         # 受信データを各変数に切り分け
         try:
             json_data = json.loads(rec_msg)
-            print "json_data:"
-            print json_data
+            self._p("json_data:")
+            self._p(json_data)
             cmd_id = json_data[self._JSON_TAG_COMMAND]
             sender_process = json_data[self._JSON_TAG_PROCESS]
             data_type = json_data[self._JSON_TAG_DATATYPE]
@@ -283,7 +322,7 @@ class ServiceThread(threading.Thread):
         except (KeyError, ValueError):
             # 受信データが異常な場合
             # クライアント側に排他制御中のエラーコードを返す
-            print traceback.print_exc()
+            self._p(traceback.print_exc())
             error_code = ErrorCode.DATA_ERROR
             # 送信する実行結果を作成
             res_buf = self._create_return_data(CommandID.NOCOMMAND, error_code, ret_data)
@@ -291,12 +330,12 @@ class ServiceThread(threading.Thread):
             return res_buf
 
         #TODO 各データ確認
-        print "cmd_id:" + str(cmd_id)
-        print "sender_process:" + str(sender_process)
-        print "data_type:" + str(data_type)
-        print "exec_data:" + str(exec_data)
+        self._p("cmd_id: {}", cmd_id)
+        self._p("sender_process: {}", sender_process)
+        self._p("data_type: {}", data_type)
+        self._p("exec_data: {}", exec_data)
 
-        print "Check connect permission"
+        self._p("Check connect permission")
         # 受信データが接続中のプロセスのものかを確認
         if self._connect_permission == False:
             # 接続権限が無い場合
@@ -308,7 +347,7 @@ class ServiceThread(threading.Thread):
             # 実行結果を送信
             return res_buf
 
-        print "Check Data"
+        self._p("Check Data")
         # 受信したデータを判断
         if data_type == self._DATA_TYPE_PROGRAM and cmd_id == CommandID.PROGRAM:
             # プログラムの場合
@@ -320,7 +359,7 @@ class ServiceThread(threading.Thread):
                     param = exec_data["PAR"]
             except KeyError:
                 # クライアント側に内部データ異常のエラーコードを返す
-                print "Key Error"
+                self._p("Key Error")
                 error_code = ErrorCode.DATA_ERROR
                 # 送信する実行結果を作成
                 res_buf = self._create_return_data(cmd_id, error_code, ret_data)
@@ -330,7 +369,8 @@ class ServiceThread(threading.Thread):
             # 操作権の確認
             if self._operation_permission == True:
                 # プログラムを実行
-                print "Program Data"
+                self._p("Program Data")
+                fsrobo_r_cc_exec_command.FSRoboRCCExecCommand._last_motion_id = None
                 exec_program = fsrobo_r_cc_exec_program.FSRoboRCCExecProgram()
 
                 # 実行するプログラムに操作権を渡す必要があるので一時的に操作権開放
@@ -341,11 +381,11 @@ class ServiceThread(threading.Thread):
                 result = self._rblib.acq_permission()
                 if result[0] == False:
                     # 操作権の取得に失敗した場合、操作権フラグをFalseに設定
-                    print "operation get error"
+                    self._p("operation get error")
                     self._operation_permission = False
                     self._exec_command.update_operation_permission(self._operation_permission)
             else:
-                print "Not operation permission"
+                self._p("Not operation permission")
                 error_code = ErrorCode.OPERATION_NONE_ERROR
 
             if del_flg == self._FILE_DELETE_TRUE:
@@ -354,29 +394,22 @@ class ServiceThread(threading.Thread):
 
         elif data_type == self._DATA_TYPE_CMD:
             # コマンドの場合
-            print "Command Data"
+            self._p("Command Data")
             error_code = self._exec_command.exec_command(cmd_id, exec_data, ret_data)
 
         elif data_type == self._DATA_TYPE_CONNECT_CHECK:
             # 接続確認の場合
-            print "Connect check data"
+            self._p("Connect check data")
             error_code = ErrorCode.SUCCESS
 
         elif data_type == self._DATA_TYPE_OPERATION_GET:
             # 操作権限取得の場合
-            print "Operation get data"
-            result = self._rblib.acq_permission()
-            if result[0] == True:
-                print "operation get success"
-                self._operation_permission = True
-                self._exec_command.update_operation_permission(self._operation_permission)
-                error_code = ErrorCode.SUCCESS
-            else:
-                print "operation get error"
-                error_code = ErrorCode.OPERATION_GET_ERROR
-
+            self._p("Operation get data")
+            self._operation_permission = True
+            self._exec_command.update_operation_permission(self._operation_permission)
+            error_code = ErrorCode.SUCCESS
         else:
-            print "ErrorData"
+            self._p("ErrorData")
             # データ種別の値が異常な場合
             # クライアント側に内部データ異常のエラーコードを返す
             error_code = ErrorCode.DATA_ERROR
@@ -397,7 +430,7 @@ class ServiceThread(threading.Thread):
         戻り値:
             res_buf: 実行結果のデータ
         """
-        print "_create_return_data execution"
+        self._p("_create_return_data execution")
         send_json = {
             self._JSON_TAG_COMMAND: cmd_id,
             self._JSON_TAG_REPLY: error_code,
@@ -415,9 +448,9 @@ class ServiceThread(threading.Thread):
         引数：
             path： 削除するファイルのパス
         """
-        print "_delete_program_file execution"
+        self._p("_delete_program_file execution")
         if os.path.exists(path):
-            print "exist path"
+            self._p("exist path")
             name_index = path.rfind("/")
             folder_path = path[0:name_index]
             shutil.rmtree(folder_path)

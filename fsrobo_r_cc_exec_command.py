@@ -36,6 +36,8 @@ import CommandID
 import ErrorCode
 
 import traceback
+import threading
+import uuid
 
 class FSRoboRCCExecCommand(object):
     """
@@ -43,11 +45,13 @@ class FSRoboRCCExecCommand(object):
     """
 
     # クラス変数
+    _MOTION_MODE_NORMAL = 0
+    _MOTION_MODE_ROS = 1
+    _last_motion_mode = None
+    _last_motion_commander_id = None
+
     # データ型のバイトサイズ
     _INT_BYTE_SIZE = 4
-
-    # 16進数
-    _HEXADECIMAL = 16
 
     # プログラム先読み動作
     _ASYNCM_READ = 0
@@ -88,7 +92,7 @@ class FSRoboRCCExecCommand(object):
 
     # PTP動作時の速度制限
     _SPEED_LIMIT_MAX = 100
-    _SPEED_LIMIT_MIN = 1
+    _SPEED_LIMIT_MIN = 0
 
     _IK_SOLVER_OPTION_DEFAULT = 0x11111111
 
@@ -99,66 +103,39 @@ class FSRoboRCCExecCommand(object):
     # 共通クラス変数
     _posture = _POSTURE_DEFAULT
 
-    def __init__(self, rblib_rob=None):
+    def __init__(self, rblib_rob):
         """
         初期化
         """
-        print "FSRoboRCCExecCommand init"
-        if rblib_rob is None:
-            print "rblib init"
-            self._rblib = rblib.Robot(self._RBLIB_HOST, self._RBLIB_PORT)
-        else:
-            print "use existing rblib"
-            self._rblib = rblib_rob
+        self._p("FSRoboRCCExecCommand init")
+        self._rblib = rblib_rob
+        print('thread id: {}'.format(threading.current_thread().ident))
+        self._motion_commander_id = uuid.uuid1()
 
         # 各マニピュレータ制御用変数をデフォルト値に設定
         self._lin_speed = self._CMD_DEFAULT_CPSPEED
         self._jnt_speed = self._CMD_DEFAULT_SPEED
         self._dacctime = self._CMD_DEFAULT_DACCT
         self._acctime = self._CMD_DEFAULT_ACCT
-        self._passm = self._CMD_DEFAULT_PASS
-        self._overlap = self._CMD_DEFAULT_OVERLAP
-        self._zone = self._CMD_DEFAULT_ZONE
         self._usingtool = self._SETTOOL_ID_NOT_USE
-        self._isopened = False
-        self._ope_permission=False
+        self._ope_permission = False
 
         # io
         self._io = FSRoboRIO()
 
-    def open(self, operation=False):
-        """
-        コマンド実行を開始する
-        """
-        print "open execution"
-        if self._isopened == False:
-            self._rblib.open()
-            if operation==True:
-                print "get operation permission"
-                result = self._rblib.acq_permission()
-                if result == True:
-                    print "open success"
-                    self._isopened = True
-                    self._ope_permission = True
-                else:
-                    print "open failed"
-                    self._rblib.close()
+    def _p(self, msg, *args):
+        if True:
+            if type(msg) is str:
+                print(msg.format(*args))
             else:
-                print "none operation permission"
-                self._isopened = True
-        return self._isopened
+                print(msg, args)
 
     def close(self):
         """
         コマンド実行を終了する
         """
-        print "close execution"
-        if self._isopened == True:
-            self._isopened = False
-            self._ope_permission = False
-            self._rblib.rel_permission()
-            self._rblib.close()
-            print "close success"
+        self._p("close execution")
+        self._io.close()
 
     def update_operation_permission(self, permission):
         """
@@ -169,16 +146,12 @@ class FSRoboRCCExecCommand(object):
             permission: 操作権限の状態
         戻り値： 現在の操作権限の状態を返す
         """
-        print "update_operation_permission execution"
-        # 操作権限を更新
-        if permission == True:
-            print "permission on"
-            self._ope_permission = True
-            # 操作権限を本当に持っているかを確認
-            self._check_operation_permission()
-        else:
-            print "permission off"
-            self._ope_permission = False
+        self._p("update_operation_permission execution")
+        self._ope_permission = permission
+
+        return self.has_op_perm()
+
+    def has_op_perm(self):
         return self._ope_permission
 
     def exec_command(self, command_id, exec_data, ret_data):
@@ -191,75 +164,61 @@ class FSRoboRCCExecCommand(object):
             ret_data: 実行結果を返すための引数 ※参照変数
         戻り値： 関数の実行結果
         """
-        print "exec_command execution"
-        error_code = ErrorCode.SUCCESS
-        try:
-            if command_id == CommandID.JMOVE_PTP:
-                error_code = self._cmd_jmove_ptp(exec_data)
-            elif command_id == CommandID.MOVE_PTP:
-                error_code = self._cmd_move_ptp(exec_data)
-            elif command_id == CommandID.SPEED_PTP:
-                error_code = self._cmd_speed_ptp(exec_data)
-            elif command_id == CommandID.SPEED_LINE:
-                error_code = self._cmd_speed_line(exec_data)
-            elif command_id == CommandID.RTOJ:
-                error_code = self._cmd_pos2joint(exec_data, ret_data)
-            elif command_id == CommandID.QJMOVE_PTP:
-                error_code = self._cmd_qjmove_ptp(exec_data)
-            elif command_id == CommandID.SETTOOL:
-                error_code = self._cmd_settool(exec_data)
-            elif command_id == CommandID.SETBASE:
-                error_code = self._cmd_setbase(exec_data)
-            elif command_id == CommandID.HOME:
-                error_code = self._cmd_home()
-            elif command_id == CommandID.SETIO:
-                error_code = self._cmd_setio(exec_data)
-            elif command_id == CommandID.GETIO:
-                error_code = self._cmd_getio(exec_data, ret_data)
-            elif command_id == CommandID.SETADC:
-                error_code = self._cmd_setadc(exec_data)
-            elif command_id == CommandID.GETADC:
-                error_code = self._cmd_getadc(ret_data)
-            elif command_id == CommandID.JMOVE_LINE:
-                error_code = self._cmd_jmove_line(exec_data)
-            elif command_id == CommandID.MOVE_LINE:
-                error_code = self._cmd_move_line(exec_data)
-            elif command_id == CommandID.SETPOSTURE:
-                error_code = self._cmd_setposture(exec_data)
-            elif command_id == CommandID.GETPOSTURE:
-                error_code = self._cmd_getposture(ret_data)
-            elif command_id == CommandID.MARK:
-                error_code = self._cmd_mark(ret_data)
-            elif command_id == CommandID.JMARK:
-                error_code = self._cmd_jmark(ret_data)
-            elif command_id == CommandID.ABORTM:
-                error_code = self._cmd_abortm(ret_data)
-            elif command_id == CommandID.SYSSTS:
-                error_code = self._cmd_syssts(exec_data, ret_data)
-            else:
-                print "cmdid error"
-                print "cmdid:" + str(command_id)
-                error_code = ErrorCode.COMMAND_ERROR
+        #self._p("exec_command execution")
 
+        op_commands = {
+            CommandID.JMOVE_PTP: self._cmd_jmove_ptp,
+            CommandID.MOVE_PTP: self._cmd_move_ptp,
+            CommandID.SPEED_PTP: self._cmd_speed_ptp,
+            CommandID.SPEED_LINE: self._cmd_speed_line,
+            CommandID.QJMOVE_PTP: self._cmd_qjmove_ptp,
+            CommandID.SETTOOL: self._cmd_settool,
+            CommandID.SETBASE: self._cmd_setbase,
+            CommandID.HOME: self._cmd_home,
+            CommandID.JMOVE_LINE: self._cmd_jmove_line,
+            CommandID.MOVE_LINE: self._cmd_move_line,
+            CommandID.SETPOSTURE: self._cmd_setposture,
+            CommandID.GETPOSTURE: self._cmd_getposture,
+            CommandID.MARK: self._cmd_mark,
+            CommandID.JMARK: self._cmd_jmark,
+            CommandID.ABORTM: self._cmd_abortm
+        }
+
+        normal_commands = {
+            CommandID.RTOJ: self._cmd_pos2joint,
+            CommandID.SYSSTS: self._cmd_syssts,
+            CommandID.SETIO: self._cmd_setio,
+            CommandID.GETIO: self._cmd_getio,
+            CommandID.SETADC: self._cmd_setadc,
+            CommandID.GETADC: self._cmd_getadc
+        }
+
+        try:
+            cmd = op_commands.get(command_id)
+            if cmd is not None:
+                if self.has_op_perm():
+                    error_code = cmd(exec_data, ret_data)
+                else:
+                    self._p("operation is not permitted")
+                    error_code = ErrorCode.OPERATION_NONE_ERROR
+            else:
+                cmd = normal_commands.get(command_id)
+                if cmd is not None:
+                    error_code = cmd(exec_data, ret_data)
+                else:
+                    self._p("cmdid error")
+                    self._p("cmdid: {}", str(command_id))
+                    error_code = ErrorCode.COMMAND_ERROR
         except Exception:
-            print "command execution error"
+            self._p("command execution error")
             traceback.print_exc()
             error_code = ErrorCode.DATA_ERROR
 
-        print "exec_command ret_data:"
-        print ret_data
+        #self._p("exec_command ret_data:")
+        #self._p(ret_data)
         return error_code
 
-    def check_open_state(self):
-        """
-        クラスがopen状態であるかを確認
-        
-        戻り値: open状態の有無 true: open、 false: close
-        """
-        print "check_open_state execution"
-        return self._isopened
-
-    def _cmd_home(self):
+    def _cmd_home(self, exec_data, ret_data):
         """
         マニピュレータを原点に戻す
 
@@ -267,19 +226,17 @@ class FSRoboRCCExecCommand(object):
             error_code: 関数の実行結果
         """
         print "_cmd_home execution"
-        if self._check_operation_permission() == True:
-            # ロボットの状態の初期化を実施
-            self._initialize()
-            
-            # 原点に戻す
-            res = self._rblib.jntmove(0, 0, 0, 0, 0, 0, self._jnt_speed, self._acctime, self._dacctime)
-            error_code = self._create_error_code(res)
-        else:
-            print "not operation permission"
-            error_code = ErrorCode.OPERATION_NONE_ERROR
+
+        # ロボットの状態の初期化を実施
+        self._reset_default_params()
+        
+        # 原点に戻す
+        res = self._rblib.jntmove(0, 0, 0, 0, 0, 0, self._jnt_speed, self._acctime, self._dacctime)
+        error_code = self._create_error_code(res)
+
         return error_code
 
-    def _cmd_move_ptp(self, exec_data):
+    def _cmd_move_ptp(self, exec_data, ret_data):
         """
         座標情報を使用してPTP動作でマニピュレータを操作する
 
@@ -288,14 +245,14 @@ class FSRoboRCCExecCommand(object):
         戻り値:
             error_code: 関数の実行結果
         """
-        print "_cmd_move_ptp execution"
+        self._p("_cmd_move_ptp execution")
         # asyncmをOFFに設定する
-        self._set_asyncm(self._ASYNCM_OFF)
-        error_code = self._move(exec_data, self._RBCOORD_PTP)
+        self._set_normal_mode()
+        error_code = self._move_ptp(exec_data)
         # 実行結果を返す
         return error_code
 
-    def _cmd_move_line(self, exec_data):
+    def _cmd_move_line(self, exec_data, ret_data):
         """
         座標情報を使用して直線補間動作でマニピュレータを操作する
 
@@ -304,14 +261,14 @@ class FSRoboRCCExecCommand(object):
         戻り値:
             error_code: 関数の実行結果
         """
-        print "_cmd_move_line execution"
+        self._p("_cmd_move_line execution")
         # asyncmをOFFに設定する
-        self._set_asyncm(self._ASYNCM_OFF)
-        error_code = self._move(exec_data, self._RBCOORD_LINE)
+        self._set_normal_mode()
+        error_code = self._move_line(exec_data)
         # 実行結果を返す
         return error_code
 
-    def _cmd_jmove_ptp(self, exec_data):
+    def _cmd_jmove_ptp(self, exec_data, ret_data):
         """
         軸情報を使用してPTP動作でマニピュレータを動かす
 
@@ -320,15 +277,15 @@ class FSRoboRCCExecCommand(object):
         戻り値:
             error_code: 関数の実行結果
         """
-        print "_cmd_jmove_ptp execution"
+        self._p("_cmd_jmove_ptp execution")
         # asyncmをOFFに設定する
-        self._set_asyncm(self._ASYNCM_OFF)
-        error_code = self._jmove(exec_data, self._RBCOORD_PTP)
+        self._set_normal_mode()
+        error_code = self._jmove_ptp(exec_data)
 
         # 実行結果を返す
         return error_code
 
-    def _cmd_jmove_line(self, exec_data):
+    def _cmd_jmove_line(self, exec_data, ret_data):
         """
         軸情報を使用して直線補間動作でマニピュレータを動かす
 
@@ -337,15 +294,15 @@ class FSRoboRCCExecCommand(object):
         戻り値:
             error_code: 関数の実行結果
         """
-        print "_cmd_jmove_line execution"
+        self._p("_cmd_jmove_line execution")
         # asyncmをOFFに設定する
-        self._set_asyncm(self._ASYNCM_OFF)
-        error_code = self._jmove(exec_data, self._RBCOORD_LINE)
+        self._set_normal_mode()
+        error_code = self._jmove_line(exec_data)
 
         # 実行結果を返す
         return error_code
 
-    def _cmd_qjmove_ptp(self, exec_data):
+    def _cmd_qjmove_ptp(self, exec_data, ret_data):
         """
         軸情報を使用して先読みのPTP動作でマニピュレータを動かす
 
@@ -354,13 +311,13 @@ class FSRoboRCCExecCommand(object):
         戻り値:
             error_code: 関数の実行結果
         """
-        print "_cmd_qjmove_ptp execution"
+        self._p("_cmd_qjmove_ptp execution")
         # asyncmをONに設定する
-        self._set_asyncm(self._ASYNCM_ON)
-        error_code = self._jmove(exec_data, self._RBCOORD_PTP)
+        self._set_ros_mode()
+        error_code = self._jmove_ptp(exec_data)
         return error_code
 
-    def _cmd_speed_ptp(self, exec_data):
+    def _cmd_speed_ptp(self, exec_data, ret_data):
         """
         PTP動作時のスピードを設定
 
@@ -369,22 +326,18 @@ class FSRoboRCCExecCommand(object):
                 SP: 設定するスピード情報
         戻り値： 関数の実行結果
         """
-        print "_cmd_speed_ptp execution"
+        self._p("_cmd_speed_ptp execution")
         error_code = ErrorCode.SUCCESS
-        if self._check_operation_permission() == True:
-            speed = exec_data["SP"]
-            if speed >= self._SPEED_LIMIT_MIN and speed <= self._SPEED_LIMIT_MAX:
-                print "speed set"
-                self._jnt_speed = speed
-            else:
-                print "speed value error"
-                error_code = ErrorCode.DATA_ERROR
+        speed = exec_data["SP"]
+        if speed > self._SPEED_LIMIT_MIN and speed <= self._SPEED_LIMIT_MAX:
+            self._p("speed set: {}", speed)
+            self._jnt_speed = speed
         else:
-            print "not operation permission"
-            error_code = ErrorCode.OPERATION_NONE_ERROR
+            self._p("speed value error")
+            error_code = ErrorCode.DATA_ERROR
         return error_code
 
-    def _cmd_speed_line(self, exec_data):
+    def _cmd_speed_line(self, exec_data, ret_data):
         """
         直線補間動作時のスピードを設定
 
@@ -393,13 +346,9 @@ class FSRoboRCCExecCommand(object):
                 SP: 設定するスピード情報
         戻り値： 関数の実行結果
         """
-        print "_cmd_speed_line execution"
+        self._p("_cmd_speed_line execution")
         error_code = ErrorCode.SUCCESS
-        if self._check_operation_permission() == True:
-            self._lin_speed = exec_data["SP"]
-        else:
-            print "not operation permission"
-            error_code = ErrorCode.OPERATION_NONE_ERROR
+        self._lin_speed = exec_data["SP"]
         return error_code
 
     def _cmd_pos2joint(self, exec_data, ret_data):
@@ -424,7 +373,7 @@ class FSRoboRCCExecCommand(object):
                 J6: 6軸目の情報
         戻り値: 関数の実行結果
         """
-        print "_cmd_pos2joint execution"
+        self._p("_cmd_pos2joint execution")
         data_x = exec_data["X"]
         data_y = exec_data["Y"]
         data_z = exec_data["Z"]
@@ -435,7 +384,7 @@ class FSRoboRCCExecCommand(object):
 
         # 姿勢情報が-1の場合はクラスに設定されている値を使用
         if posture == self._POSTURE_NONE:
-            print "set posture"
+            self._p("set posture")
             posture = FSRoboRCCExecCommand._posture
 
         error_code = ErrorCode.SUCCESS
@@ -453,7 +402,7 @@ class FSRoboRCCExecCommand(object):
 
         return error_code
 
-    def _cmd_settool(self, exec_data):
+    def _cmd_settool(self, exec_data, ret_data):
         """
         ツールオフセットを設定
 
@@ -467,7 +416,7 @@ class FSRoboRCCExecCommand(object):
                 Rz: ラジアンZ座標
         戻り値: 関数の実行結果
         """
-        print "_cmd_settool execution"
+        self._p("_cmd_settool execution")
         data_x = exec_data["X"]
         data_y = exec_data["Y"]
         data_z = exec_data["Z"]
@@ -481,17 +430,13 @@ class FSRoboRCCExecCommand(object):
         if ct_error_code != ErrorCode.SUCCESS:
             return ct_error_code
 
-        try:
-            st_res = self._rblib.settool(self._SETTOOL_ID_USE, data_x, data_y, data_z, data_rz, data_ry, data_rx)
-        except Exception:
-            traceback.print_exc()
-            # エラー発生前のツールオフセットの設定に戻す
-            self._rblib.changetool(self._usingtool)
-            return ErrorCode.DATA_ERROR
+        st_res = self._rblib.settool(self._SETTOOL_ID_USE, data_x, data_y, data_z, data_rz, data_ry, data_rx)
 
         st_error_code = self._create_error_code(st_res)
         if st_error_code != ErrorCode.SUCCESS:
             # エラーコードが返された場合
+            # エラー発生前のツールオフセットの設定に戻す
+            self._rblib.changetool(self._usingtool)
             return st_error_code
 
         self._rblib.changetool(self._SETTOOL_ID_USE)
@@ -500,7 +445,7 @@ class FSRoboRCCExecCommand(object):
         self._usingtool = self._SETTOOL_ID_USE
         return ErrorCode.SUCCESS
 
-    def _cmd_setbase(self, exec_data):
+    def _cmd_setbase(self, exec_data, ret_data):
         """
         ベースオフセットを設定
 
@@ -514,21 +459,18 @@ class FSRoboRCCExecCommand(object):
                 Rz: ラジアンZ座標
         戻り値: 関数の実行結果
         """
-        print "_cmd_setbase execution"
+        self._p("_cmd_setbase execution")
         error_code = ErrorCode.SUCCESS
-        if self._check_operation_permission() == True:
-            data_x = exec_data["X"]
-            data_y = exec_data["Y"]
-            data_z = exec_data["Z"]
-            data_rx = exec_data["Rx"]
-            data_ry = exec_data["Ry"]
-            data_rz = exec_data["Rz"]
-        else:
-            print "not operation permission"
-            error_code = ErrorCode.OPERATION_NONE_ERROR
+        data_x = exec_data["X"]
+        data_y = exec_data["Y"]
+        data_z = exec_data["Z"]
+        data_rx = exec_data["Rx"]
+        data_ry = exec_data["Ry"]
+        data_rz = exec_data["Rz"]
+
         return error_code
 
-    def _cmd_setposture(self, exec_data):
+    def _cmd_setposture(self, exec_data, ret_data):
         """
         姿勢情報の設定
 
@@ -538,20 +480,18 @@ class FSRoboRCCExecCommand(object):
         戻り値: 関数の実行結果
         """
         error_code = ErrorCode.SUCCESS
-        if self._check_operation_permission() == True:
-            posture = exec_data["P"]
-            if posture >= 0 and posture <= 7:
-                print "success set posture"
-                FSRoboRCCExecCommand._posture = posture
-            else:
-                print "error set posture"
-                error_code = ErrorCode.DATA_ERROR
+
+        posture = exec_data["P"]
+        if posture >= 0 and posture <= 7:
+            self._p("success set posture")
+            FSRoboRCCExecCommand._posture = posture
         else:
-            print "not operation permission"
-            error_code = ErrorCode.OPERATION_NONE_ERROR
+            print "error set posture"
+            error_code = ErrorCode.DATA_ERROR
+
         return error_code
 
-    def _cmd_getposture(self, ret_data):
+    def _cmd_getposture(self, exec_data, ret_data):
         """
         姿勢情報の取得
 
@@ -563,7 +503,7 @@ class FSRoboRCCExecCommand(object):
         ret_data["P"] = FSRoboRCCExecCommand._posture
         return ErrorCode.SUCCESS
 
-    def _cmd_setio(self, exec_data):
+    def _cmd_setio(self, exec_data, ret_data):
         """
         I/O出力を設定
 
@@ -573,7 +513,7 @@ class FSRoboRCCExecCommand(object):
                 SL: 変更する信号の文字列
         戻り値: 関数の実行結果
         """
-        print "_cmd_setio execution"
+        self._p("_cmd_setio execution")
         address = exec_data["AD"]
         signal = exec_data["SL"]
 
@@ -593,7 +533,7 @@ class FSRoboRCCExecCommand(object):
                 SL: 指定された範囲内のI/O状態
         戻り値: 関数の実行結果
         """
-        print "_cmd_getio execution"
+        self._p("_cmd_getio execution")
         start_address = exec_data["SA"]
         end_address = exec_data["EA"]
 
@@ -602,7 +542,7 @@ class FSRoboRCCExecCommand(object):
         
         return ErrorCode.SUCCESS
 
-    def _cmd_setadc(self, exec_data):
+    def _cmd_setadc(self, exec_data, ret_data):
         """
         先端I/OのADC測定を設定
 
@@ -612,7 +552,7 @@ class FSRoboRCCExecCommand(object):
                 MO: 測定するモード
         戻り値: 関数の実行結果
         """
-        print "_cmd_setadc execution"
+        self._p("_cmd_setadc execution")
         channel = exec_data["CH"]
         mode = exec_data["MO"]
 
@@ -620,7 +560,7 @@ class FSRoboRCCExecCommand(object):
 
         return ErrorCode.SUCCESS
 
-    def _cmd_getadc(self, ret_data):
+    def _cmd_getadc(self, exec_data, ret_data):
         """
         先端I/OのADC値を出力
 
@@ -629,13 +569,13 @@ class FSRoboRCCExecCommand(object):
                 ADC: 2ch分の先端I/OのADCの値
         戻り値: 関数の実行結果
         """
-        print "_cmd_getadc execution"
+        self._p("_cmd_getadc execution")
         adc = self._io.adcin()
         ret_data["ADC"] = adc
 
         return ErrorCode.SUCCESS
 
-    def _cmd_mark(self, ret_data):
+    def _cmd_mark(self, exec_data, ret_data):
         """
         現在位置の座標情報を取得
 
@@ -650,7 +590,7 @@ class FSRoboRCCExecCommand(object):
                 P: ロボットの姿勢情報
         戻り値: 関数の実行結果
         """
-        print "_cmd_mark execution"
+        self._p("_cmd_mark execution")
 
         error_code = ErrorCode.SUCCESS
         res = self._rblib.mark()
@@ -667,7 +607,7 @@ class FSRoboRCCExecCommand(object):
 
         return error_code
 
-    def _cmd_jmark(self, ret_data):
+    def _cmd_jmark(self, exec_data, ret_data):
         """
         現在位置の軸情報を取得
 
@@ -681,7 +621,7 @@ class FSRoboRCCExecCommand(object):
                 J6: 6軸目の情報
         戻り値: 関数の実行結果
         """
-        print "_cmd_jmark execution"
+        self._p("_cmd_jmark execution")
 
         error_code = ErrorCode.SUCCESS
         res = self._rblib.jmark()
@@ -698,7 +638,7 @@ class FSRoboRCCExecCommand(object):
 
         return error_code
 
-    def _cmd_abortm(self, ret_data):
+    def _cmd_abortm(self, exec_data, ret_data):
         """
         ロボット動作を中断
 
@@ -707,7 +647,7 @@ class FSRoboRCCExecCommand(object):
                 ID: 中断した動作の動作ID
         戻り値: 関数の実行結果
         """
-        print "_cmd_abortm execution"
+        self._p("_cmd_abortm execution")
 
         error_code = ErrorCode.SUCCESS
         res = self._rblib.abortm()
@@ -730,90 +670,76 @@ class FSRoboRCCExecCommand(object):
                 RE: 取得データ
         戻り値: 関数の実行結果
         """
-        print "_cmd_syssts execution"
+        #self._p("_cmd_syssts execution")
 
-        error_code = ErrorCode.SUCCESS
         res = self._rblib.syssts(exec_data["TYPE"])
-        print('res: {}'.format(res))
-        if res[0] == True:
+        #self._p('res: {}', res)
+        error_code = self._create_error_code(res)
+        if error_code == ErrorCode.SUCCESS:
             ret_data["RE"] = res[1]
-        else:
-            error_code = self._create_error_code(res)
 
         return error_code
 
 
-    def _initialize(self):
+    def _reset_default_params(self):
         """
         クラス変数とマニピュレータの状態の初期化を行う
         """
-        print "_initialize execution"
+        self._p("_reset_default_params execution")
         # 各マニピュレータ制御用変数をデフォルト値に設定
         self._lin_speed = self._CMD_DEFAULT_CPSPEED
         self._jnt_speed = self._CMD_DEFAULT_SPEED
         self._dacctime = self._CMD_DEFAULT_DACCT
         self._acctime = self._CMD_DEFAULT_ACCT
-        self._passm = self._CMD_DEFAULT_PASS
-        self._overlap = self._CMD_DEFAULT_OVERLAP
-        self._zone = self._CMD_DEFAULT_ZONE
         self._usingtool = self._SETTOOL_ID_NOT_USE
         # Neativeの状態を初期化
         # 移動が終わるまで待機
         self._rblib.joinm()
-        self._rblib.changetool(self._usingtool)
+        self._rblib.changetool(self._SETTOOL_ID_NOT_USE)
         # 初期ではasyncmはOFFに設定する
         self._rblib.asyncm(self._ASYNCM_OFF)
-        self._rblib.passm(self._passm)
-        self._rblib.overlap(self._overlap)
-        self._rblib.zone(self._zone)
+        self._rblib.passm(self._CMD_DEFAULT_PASS)
+        self._rblib.overlap(self._CMD_DEFAULT_OVERLAP)
+        self._rblib.zone(self._CMD_DEFAULT_ZONE)
         self._rblib.disable_mdo(self._MDO_ALL)
 
         FSRoboRCCExecCommand._posture = self._POSTURE_DEFAULT
 
-    def _set_asyncm(self, status):
-        """
-        先読み動作の設定と関わる変数の状態を切り替える
-
-        引数:
-            status: 先読み動作の設定値
-                1: ON
-                2: OFF
-        """
-        print "_set_asyncm execution"
-        if (status == self._ASYNCM_ON):
-            print "setting asyncm on"
-            # 動作時のパラメータを設定する
+    def _set_ros_mode(self):
+        current_id = self._motion_commander_id
+        print('current_id: {}'.format(current_id))
+        if FSRoboRCCExecCommand._last_motion_mode != FSRoboRCCExecCommand._MOTION_MODE_ROS \
+                or FSRoboRCCExecCommand._last_motion_commander_id != current_id:
+            FSRoboRCCExecCommand._last_motion_mode = FSRoboRCCExecCommand._MOTION_MODE_ROS
+            FSRoboRCCExecCommand._last_motion_commander_id = current_id
+            print('set ROS mode')
+            self._rblib.joinm()
             self._acctime = 0
             self._dacctime = 0
-            self._passm = self._PASSM_ON
-        else:
-            print "setting asyncm off"
-            # 動作時のパラメータを設定
-            self._acctime = self._CMD_DEFAULT_ACCT
+            self._rblib.passm(self._PASSM_ON)
+            self._rblib.asyncm(self._ASYNCM_ON)
+            self._rblib.overlap(self._CMD_DEFAULT_OVERLAP)
+            self._rblib.zone(self._CMD_DEFAULT_ZONE)
+            self._rblib.disable_mdo(self._MDO_ALL)
+
+    def _set_normal_mode(self):
+        current_id = self._motion_commander_id
+        print('current_id: {}'.format(current_id))
+        if FSRoboRCCExecCommand._last_motion_mode != FSRoboRCCExecCommand._MOTION_MODE_NORMAL \
+                or FSRoboRCCExecCommand._last_motion_commander_id != current_id:
+            FSRoboRCCExecCommand._last_motion_mode = FSRoboRCCExecCommand._MOTION_MODE_NORMAL
+            FSRoboRCCExecCommand._last_motion_commander_id = current_id
+            print('set Normal mode')
+            self._rblib.joinm()
             self._dacctime = self._CMD_DEFAULT_DACCT
-            self._passm = self._PASSM_OFF
+            self._acctime = self._CMD_DEFAULT_ACCT
+            self._rblib.passm(self._PASSM_OFF)
+            self._rblib.asyncm(self._ASYNCM_OFF)
+            self._rblib.overlap(self._CMD_DEFAULT_OVERLAP)
+            self._rblib.zone(self._CMD_DEFAULT_ZONE)
+            self._rblib.disable_mdo(self._MDO_ALL)
 
-        # asyncmの設定
-        asyncm_status = self._rblib.asyncm(self._ASYNCM_READ)
-        if (status != asyncm_status[1]):
-            # 設定する状態が現在の設定と一致しない場合のみ、設定する
-            print "setting asyncm"
-            # 移動が終わるまで待機
-            self._rblib.joinm()
-            # asyncmを設定する
-            self._rblib.asyncm(status)
-
-        # passmの設定
-        passm_status = self._rblib.passm(self._PASSM_READ)
-        if (self._passm != passm_status[1]):
-            # 設定する状態が現在の設定と一致しない場合のみ、設定する
-            print "setting passm"
-            # 移動が終わるまで待機
-            self._rblib.joinm()
-            # passmを設定する
-            self._rblib.passm(self._passm)
-
-    def _move(self, exec_data, rbcoord):
+    def _move_ptp(self, exec_data):
         """
         座標情報を使用して指定された動作でマニピュレータを操作する
 
@@ -827,13 +753,10 @@ class FSRoboRCCExecCommand(object):
                 Rz: ラジアンZ座標
                 P: ロボットの姿勢情報
                 CC: ロボットの多回転情報
-            rbcoord: マニピュレータの動作
-                0: PTP動作
-                1: 直線補間動作
         戻り値:
             error_code: 関数の実行結果
         """
-        print "_move execution"
+        self._p("_move execution")
 
         # 受信データから座標データを取得
         pos_x = exec_data["X"]
@@ -842,60 +765,81 @@ class FSRoboRCCExecCommand(object):
         pos_rx = exec_data["Rx"]
         pos_ry = exec_data["Ry"]
         pos_rz = exec_data["Rz"]
-        pos_posture = exec_data["P"]
-        if "ATM" in exec_data:
-            self._acctime = exec_data["ATM"]
-        if "DTM" in exec_data:
-            self._dacctime = exec_data["DTM"]
 
-        if (rbcoord == self._RBCOORD_PTP):
-            # 受信データから座標データを取得
-            if "CC" in exec_data:
-                pos_cc = int(exec_data["CC"], self._HEXADECIMAL)
-            else:
-                pos_cc = 0xFF000000
-            if "SP" in exec_data:
-                self._jnt_speed = exec_data["SP"]
+        pos_posture = exec_data.get("P", self._POSTURE_NONE)
+        if pos_posture == self._POSTURE_NONE:
+            pos_posture = FSRoboRCCExecCommand._posture 
 
-            # 姿勢情報が-1の場合はクラスに設定されている値を使用
-            if pos_posture == self._POSTURE_NONE:
-                print "set posture"
-                pos_posture = FSRoboRCCExecCommand._posture
-            # PTP動作でマニピュレータを操作
-            if pos_cc != self._CC_NOT_USE:
-                print "ptpmove_mt execution"
-                res = self._rblib.ptpmove_mt(pos_x, pos_y, pos_z, pos_rz, pos_ry, pos_rx,\
-                                            pos_posture, self._RBCOORD_LINE, pos_cc, self._IK_SOLVER_OPTION_DEFAULT, self._jnt_speed,\
-                                            self._acctime, self._dacctime)
-            else:
-                print "ptpmove execution"
-                res = self._rblib.ptpmove(pos_x, pos_y, pos_z, pos_rz, pos_ry, pos_rx,\
-                                            pos_posture, self._RBCOORD_LINE, self._jnt_speed,\
-                                            self._acctime, self._dacctime)
+        acctime = exec_data.get("ATM", self._acctime)
+        dacctime = exec_data.get("DTM", self._dacctime)
+        pos_cc = int(exec_data("CC", "FF000000"), 16)
+        speed = exec_data.get("SP", self._jnt_speed)
 
-            print "move_ptp result:"
-            print res
+        # PTP動作でマニピュレータを操作
+        if pos_cc != self._CC_NOT_USE:
+            self._p("ptpmove_mt execution")
+            res = self._rblib.ptpmove_mt(pos_x, pos_y, pos_z, pos_rz, pos_ry, pos_rx,
+                                            pos_posture, self._RBCOORD_LINE, pos_cc, self._IK_SOLVER_OPTION_DEFAULT,
+                                            speed, acctime, dacctime)
         else:
-            # 受信データから座標データを取得
-            if "SP" in exec_data:
-                self._lin_speed = exec_data["SP"]
-            # 姿勢情報が-1の場合はクラスに設定されている値を使用
-            if pos_posture == self._POSTURE_NONE:
-                print "set posture"
-                pos_posture = FSRoboRCCExecCommand._posture
-            # 直線補間動作でマニピュレータを操作
-            res = self._rblib.cpmove(pos_x, pos_y, pos_z, pos_rz, pos_ry, pos_rx,\
-                                pos_posture, self._RBCOORD_LINE, self._lin_speed,\
-                                self._acctime, self._dacctime)
-            print "move_line result:"
-            print res
+            self._p("ptpmove execution")
+            res = self._rblib.ptpmove(pos_x, pos_y, pos_z, pos_rz, pos_ry, pos_rx,
+                                        pos_posture, self._RBCOORD_LINE, speed, acctime, dacctime)
+
+        self._p("move_ptp result:")
+        self._p(res)
 
         # 実行結果を生成
         error_code = self._create_error_code(res)
         # 実行結果を返す
         return error_code
 
-    def _jmove(self, exec_data, rbcoord):
+    def _move_line(self, exec_data):
+        """
+        座標情報を使用して指定された動作でマニピュレータを操作する
+
+        引数：
+            exec_data: コマンド実行用データ JSON形式
+                X: X座標
+                Y: Y座標
+                Z: Z座標
+                Rx: ラジアンX座標
+                Ry: ラジアンY座標
+                Rz: ラジアンZ座標
+                P: ロボットの姿勢情報
+                CC: ロボットの多回転情報
+        戻り値:
+            error_code: 関数の実行結果
+        """
+        self._p("_move execution")
+
+        # 受信データから座標データを取得
+        pos_x = exec_data["X"]
+        pos_y = exec_data["Y"]
+        pos_z = exec_data["Z"]
+        pos_rx = exec_data["Rx"]
+        pos_ry = exec_data["Ry"]
+        pos_rz = exec_data["Rz"]
+        pos_posture = exec_data.get("P", self._POSTURE_NONE)
+        if pos_posture == self._POSTURE_NONE:
+            pos_posture = FSRoboRCCExecCommand._posture 
+        acctime = exec_data.get("ATM", self._acctime)
+        dacctime = exec_data.get("DTM", self._dacctime)
+        speed = exec_data.get("SP", self._lin_speed)
+
+        # 直線補間動作でマニピュレータを操作
+        res = self._rblib.cpmove(pos_x, pos_y, pos_z, pos_rz, pos_ry, pos_rx,
+                            pos_posture, self._RBCOORD_LINE, speed, acctime, dacctime)
+
+        self._p("move_line result:")
+        self._p(res)
+
+        # 実行結果を生成
+        error_code = self._create_error_code(res)
+        # 実行結果を返す
+        return error_code
+
+    def _jmove_ptp(self, exec_data):
         """
         軸情報を使用して指定した動作でマニピュレータを動かす
 
@@ -907,13 +851,10 @@ class FSRoboRCCExecCommand(object):
                 J4: 4軸目の情報
                 J5: 5軸目の情報
                 J6: 6軸目の情報
-            rbcoord: マニピュレータの動作
-                0: PTP動作
-                1: 直線補間動作
         戻り値:
             error_code: 関数の実行結果
         """
-        print "_jmove execution"
+        self._p("_jmove execution")
         # タグチェック
         pos_j1 = exec_data["J1"]
         pos_j2 = exec_data["J2"]
@@ -921,28 +862,52 @@ class FSRoboRCCExecCommand(object):
         pos_j4 = exec_data["J4"]
         pos_j5 = exec_data["J5"]
         pos_j6 = exec_data["J6"]
-        if "ATM" in exec_data:
-            self._acctime = exec_data["ATM"]
-        if "DTM" in exec_data:
-            self._dacctime = exec_data["DTM"]
+        acctime = exec_data.get("ATM", self._acctime)
+        dacctime = exec_data.get("DTM", self._dacctime)
+        speed = exec_data.get("SP", self._jnt_speed)
 
         # joint動作開始
-        if (rbcoord == self._RBCOORD_PTP):
-            # 受信データから座標データを取得
-            if "SP" in exec_data:
-                self._jnt_speed = exec_data["SP"]
+        self._p("jntmove execution: {} {} {} {} {} {} {} {} {}", pos_j1, pos_j2, pos_j3, pos_j4, pos_j5, pos_j6, speed, acctime, dacctime)
+        res = self._rblib.jntmove(pos_j1, pos_j2, pos_j3, pos_j4, pos_j5, pos_j6, speed, acctime, dacctime)
+        
+        # 実行結果を生成
+        error_code = self._create_error_code(res)
+        # 実行結果を返す
+        return error_code
 
-            print "jntmove execution"
-            res = self._rblib.jntmove(pos_j1, pos_j2, pos_j3, pos_j4, pos_j5, pos_j6, self._jnt_speed, self._acctime, self._dacctime)
-        else:
-            # 受信データから座標データを取得
-            if "SP" in exec_data:
-                self._lin_speed = exec_data["SP"]
-            print "cpmove execution"
-            p = self._rblib.j2r_mt(pos_j1, pos_j2, pos_j3, pos_j4, pos_j5, pos_j6, self._RBCOORD_LINE)
-            x, y, z, rz, ry, rx = p[1:7]
-            posture = p[7]
-            res = self._rblib.cpmove(x, y, z, rz, ry, rx, posture, rbcoord, self._lin_speed, self._acctime, self._dacctime)
+    def _jmove_line(self, exec_data):
+        """
+        軸情報を使用して指定した動作でマニピュレータを動かす
+
+        引数:
+            exec_data: コマンド実行用データ JSON形式
+                J1: 1軸目の情報
+                J2: 2軸目の情報
+                J3: 3軸目の情報
+                J4: 4軸目の情報
+                J5: 5軸目の情報
+                J6: 6軸目の情報
+        戻り値:
+            error_code: 関数の実行結果
+        """
+        self._p("_jmove execution")
+        # タグチェック
+        pos_j1 = exec_data["J1"]
+        pos_j2 = exec_data["J2"]
+        pos_j3 = exec_data["J3"]
+        pos_j4 = exec_data["J4"]
+        pos_j5 = exec_data["J5"]
+        pos_j6 = exec_data["J6"]
+        acctime = exec_data.get("ATM", self._acctime)
+        dacctime = exec_data.get("DTM", self._dacctime)
+        speed = exec_data.get("SP", self._lin_speed)
+
+        # 受信データから座標データを取得
+        self._p("cpmove execution")
+        p = self._rblib.j2r_mt(pos_j1, pos_j2, pos_j3, pos_j4, pos_j5, pos_j6, self._RBCOORD_LINE)
+        x, y, z, rz, ry, rx = p[1:7]
+        posture = p[7]
+        res = self._rblib.cpmove(x, y, z, rz, ry, rx, posture, self._RBCOORD_LINE, speed, acctime, dacctime)
         
         # 実行結果を生成
         error_code = self._create_error_code(res)
@@ -958,31 +923,16 @@ class FSRoboRCCExecCommand(object):
         戻り値:
             error_code: コマンドの実行結果
         """
-        print "_create_error_code excution"
+        #self._p("_create_error_code excution")
         error_code = ErrorCode.SUCCESS
         if result[0] == False:
-            print "command failed"
-            print result
+            self._p("command failed")
+            self._p(result)
             if result[1] == 3 and result[2] == 1:
-                print "not operation permission"
+                self._p("not operation permission")
                 error_code = ErrorCode.OPERATION_NONE_ERROR
             else:
-                print "robot error"
+                self._p("robot error")
                 error_code = ErrorCode.ROBOT_ERROR
-            print("error div: {}, code: {}".format(result[1], result[2]))
+            self._p("error div: {}, code: {}", result[1], result[2])
         return error_code
-
-    def _check_operation_permission(self):
-        """
-        操作権限を持っているかを確認
-        戻り値： 操作権限の有無 True:有り False:無し
-        """
-        print "_check_operation_permission execution"
-        # 操作権限を本当に持っているかを確認
-        if self._ope_permission == True:
-            result = self._rblib.acq_permission()
-            if result[0] == False:
-                # 操作権限を持っていないので操作権限をOFFにする
-                print "disable operation permission"
-                self._ope_permission = False
-        return self._ope_permission
